@@ -1,0 +1,9 @@
+/dist/
+/build/
+.vs/
+*.user
+*.suo
+status.json
+auth.json
+.env
+.env.*
