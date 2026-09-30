@@ -279,7 +279,7 @@ internal sealed class TaskbarRings : Form
                 foregroundHook = NativeDock.SetWinEventHook(3, 3, IntPtr.Zero, foregroundCallback, 0, 0, 0);
             }
         };
-        hint.SetToolTip(this, "5h：5 小时剩余 · 7d：每周剩余\n点击查看详情，拖动调整位置");
+        hint.SetToolTip(this, "");
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -293,6 +293,14 @@ internal sealed class TaskbarRings : Form
 
     internal void UpdateExpiry() { expiry = MembershipExpiry.Value; PlaceOnTaskbar(); Redraw(); }
     internal void SetRefreshing(bool value) { refreshing = value; Redraw(); }
+
+    internal bool PointerOverRings(Point screenPoint)
+    {
+        if (!Visible || dragging || refreshPressed) return false;
+        Point point = PointToClient(screenPoint);
+        // Include transparent centers and the gap to avoid flicker between rings.
+        return new RectangleF(9, 0, 107, 44).Contains(point.X / scale, point.Y / scale);
+    }
 
     private void Redraw()
     {
@@ -366,7 +374,7 @@ internal sealed class TaskbarRings : Form
         if (hover != refreshHover)
         {
             refreshHover = hover; Cursor = hover ? Cursors.Hand : Cursors.Default;
-            hint.SetToolTip(this, hover ? "立即刷新额度" : "5h：5 小时剩余 · 7d：每周剩余\n点击查看详情，拖动调整位置");
+            hint.SetToolTip(this, hover ? "立即刷新额度" : "");
             Redraw();
         }
         if (!dragging) return;
@@ -398,13 +406,33 @@ internal sealed class TaskbarRings : Form
     }
 }
 
+internal sealed class HoverIntent
+{
+    private long entered = -1, left = -1;
+    private bool dismissed;
+    internal void Dismiss() { dismissed = true; entered = left = -1; }
+    internal int Update(bool overRings, bool overCard, bool visible, long now)
+    {
+        if (!overRings && !overCard) dismissed = false;
+        if (overRings || (visible && overCard))
+        {
+            left = -1;
+            if (dismissed) return 0;
+            if (entered < 0) entered = now;
+            return !visible && overRings && now - entered >= 200 ? 1 : 0;
+        }
+        entered = -1;
+        if (left < 0) left = now;
+        return visible && now - left >= 280 ? -1 : 0;
+    }
+}
+
 internal sealed class QuotaDetails : Form
 {
     private readonly float scale;
     private readonly bool dark;
     private QuotaResult latest;
     private bool stale;
-    private readonly ToolTip hint = new ToolTip();
 
     internal QuotaDetails(Rectangle anchor)
     {
@@ -415,59 +443,95 @@ internal sealed class QuotaDetails : Form
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         TopMost = true;
-        DoubleBuffered = true;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size((int)(320 * scale), (int)(226 * scale));
-        BackColor = dark ? Color.FromArgb(28, 33, 43) : Color.FromArgb(250, 252, 255);
-        using (GraphicsPath shape = RingArt.Round(0, 0, Width, Height, 14 * scale)) Region = new Region(shape);
-        Rectangle working = Screen.FromRectangle(anchor).WorkingArea;
-        Location = new Point(Math.Max(working.Left + 8, Math.Min(working.Right - Width - 8, anchor.Right - Width)), Math.Max(working.Top + 8, anchor.Top - Height - (int)(10 * scale)));
-        KeyPreview = true;
-        KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); };
+        Size = new Size((int)(344 * scale), (int)(244 * scale));
+        PlaceNear(anchor);
+        Shown += delegate { Redraw(); };
     }
+    protected override bool ShowWithoutActivation { get { return true; } }
     protected override CreateParams CreateParams
-    { get { CreateParams p = base.CreateParams; p.ClassStyle |= 0x20000; p.ExStyle |= 0x80; return p; } }
+    { get { CreateParams p = base.CreateParams; p.ExStyle |= 0x80000 | 0x80 | 0x08000000; return p; } }
 
+    internal void PlaceNear(Rectangle anchor)
+    {
+        Rectangle working = Screen.FromRectangle(anchor).WorkingArea;
+        Location = new Point(Math.Max(working.Left, Math.Min(working.Right - Width, anchor.Right - Width)),
+            Math.Max(working.Top, anchor.Top - Height + (int)(3 * scale)));
+    }
+    internal bool ContainsPointer(Point screenPoint)
+    {
+        Point point = PointToClient(screenPoint);
+        return new RectangleF(10, 8, 324, 224).Contains(point.X / scale, point.Y / scale);
+    }
     internal void UpdateValues(QuotaResult result, bool isStale, string error)
-    {
-        latest = result; stale = isStale;
-        hint.SetToolTip(this, isStale ? "连接暂时不可用，可点击任务栏 Exp 下方按钮刷新。" : "每 5 分钟更新一次；点击任务栏 Exp 下方按钮立即刷新。");
-        Invalidate();
-    }
+    { latest = result; stale = isStale; Redraw(); }
 
-    protected override void OnPaint(PaintEventArgs e)
+    private void Redraw()
     {
-        base.OnPaint(e);
-        Graphics g = e.Graphics;
-        g.ScaleTransform(scale, scale);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        Color ink = dark ? Color.FromArgb(237, 243, 252) : Color.FromArgb(34, 47, 66);
-        Color muted = dark ? Color.FromArgb(154, 169, 192) : Color.FromArgb(115, 130, 151);
-        RingArt.Text(g, "Codex 额度", 18, FontStyle.Bold, ink, new RectangleF(20, 16, 230, 28), StringAlignment.Near);
-        RingArt.Text(g, "剩余百分比", 11, FontStyle.Regular, muted, new RectangleF(20, 43, 230, 20), StringAlignment.Near);
-        RingArt.Text(g, "×", 22, FontStyle.Regular, muted, new RectangleF(275, 15, 30, 30), StringAlignment.Center);
-        Card(g, new RectangleF(16, 77, 140, 110), latest == null ? null : latest.FiveHours, false, ink, muted);
-        Card(g, new RectangleF(164, 77, 140, 110), latest == null ? null : latest.Weekly, true, ink, muted);
-        string status = stale ? (latest == null ? "连接暂时不可用 · 正在自动重试" : "连接暂时不可用 · 显示上次读数") : (latest == null ? "正在查询额度…" : "更新于 " + latest.CheckedAt.ToString("HH:mm") + " · 每 5 分钟刷新");
-        RingArt.Text(g, status, 10, FontStyle.Regular, muted, new RectangleF(20, 194, 280, 20), StringAlignment.Near);
+        if (!IsHandleCreated || IsDisposed) return;
+        using (Bitmap bitmap = Render(scale, latest, stale, dark)) NativeDock.Present(this, bitmap);
     }
-
-    private void Card(Graphics g, RectangleF rect, QuotaWindow window, bool weekly, Color ink, Color muted)
+    internal static Bitmap Render(float scale, QuotaResult latest, bool stale, bool dark)
+    {
+        Bitmap bitmap = new Bitmap((int)(344 * scale), (int)(244 * scale), PixelFormat.Format32bppPArgb);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            g.ScaleTransform(scale, scale);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            for (int spread = 8; spread >= 1; spread--)
+                using (GraphicsPath shadow = RingArt.Round(10 - spread, 10 - spread / 2f, 324 + spread * 2, 222 + spread, 18 + spread))
+                using (SolidBrush brush = new SolidBrush(Color.FromArgb(dark ? 7 : 3, 15, 25, 43))) g.FillPath(brush, shadow);
+            using (GraphicsPath panel = RingArt.Round(10, 8, 324, 224, 18))
+            using (LinearGradientBrush fill = new LinearGradientBrush(new RectangleF(10, 8, 324, 224),
+                dark ? Color.FromArgb(33, 39, 50) : Color.FromArgb(254, 255, 255),
+                dark ? Color.FromArgb(25, 30, 39) : Color.FromArgb(246, 249, 253), 90f))
+            using (Pen border = new Pen(dark ? Color.FromArgb(65, 77, 95) : Color.FromArgb(223, 230, 240), .8f))
+            { g.FillPath(fill, panel); g.DrawPath(border, panel); }
+            Color ink = dark ? Color.FromArgb(237, 243, 252) : Color.FromArgb(35, 48, 67);
+            Color muted = dark ? Color.FromArgb(158, 173, 193) : Color.FromArgb(121, 135, 155);
+            RingArt.Text(g, "Codex", 18, FontStyle.Bold, ink, new RectangleF(28, 23, 88, 27), StringAlignment.Near);
+            RingArt.Text(g, "额度概览", 11, FontStyle.Regular, muted, new RectangleF(98, 26, 115, 24), StringAlignment.Near);
+            RingArt.Text(g, "剩余可用额度", 10, FontStyle.Regular, muted, new RectangleF(29, 50, 210, 18), StringAlignment.Near);
+            using (Pen close = new Pen(muted, 1.2f))
+            { g.DrawLine(close, 307, 32, 314, 39); g.DrawLine(close, 314, 32, 307, 39); }
+            Card(g, new RectangleF(26, 80, 141, 111), latest == null ? null : latest.FiveHours, false, stale, dark, muted);
+            Card(g, new RectangleF(177, 80, 141, 111), latest == null ? null : latest.Weekly, true, stale, dark, muted);
+            Color statusColor = stale ? Color.FromArgb(218, 151, 38) : latest == null ? muted : Color.FromArgb(20, 168, 126);
+            using (SolidBrush dot = new SolidBrush(statusColor)) g.FillEllipse(dot, 29, 207, 4, 4);
+            string status = stale ? (latest == null ? "连接暂不可用 · 自动重试中" : "离线 · 显示上次读数") : latest == null ? "正在查询额度…" : "更新于 " + latest.CheckedAt.ToString("HH:mm") + "  ·  每 5 分钟刷新";
+            RingArt.Text(g, status, 9, FontStyle.Regular, muted, new RectangleF(39, 199, 277, 20), StringAlignment.Near);
+        }
+        return bitmap;
+    }
+    private static void Card(Graphics g, RectangleF rect, QuotaWindow window, bool weekly, bool stale, bool dark, Color muted)
     {
         Color accent = RingArt.Accent(window, weekly, stale);
-        using (GraphicsPath shape = RingArt.Round(rect.X, rect.Y, rect.Width, rect.Height, 12))
-        using (SolidBrush brush = new SolidBrush(dark ? Color.FromArgb(36, 43, 56) : Color.White)) g.FillPath(brush, shape);
-        RingArt.Text(g, weekly ? "每周" : "5 小时", 11, FontStyle.Regular, muted, new RectangleF(rect.X + 14, rect.Y + 9, 110, 20), StringAlignment.Near);
-        RingArt.Text(g, window == null ? "—" : window.Remaining.ToString() + "%", 29, FontStyle.Bold, accent, new RectangleF(rect.X + 12, rect.Y + 28, 116, 44), StringAlignment.Near);
-        RingArt.Text(g, "重置 " + CodexQuotaRings.FormatReset(window), 9, FontStyle.Regular, muted, new RectangleF(rect.X + 14, rect.Y + 81, 118, 20), StringAlignment.Near);
+        using (GraphicsPath shape = RingArt.Round(rect.X, rect.Y, rect.Width, rect.Height, 13))
+        using (SolidBrush fill = new SolidBrush(dark ? Color.FromArgb(37, 45, 58) : Color.White))
+        using (Pen border = new Pen(Color.FromArgb(dark ? 45 : 24, accent), .8f))
+        { g.FillPath(fill, shape); g.DrawPath(border, shape); }
+        RingArt.Text(g, weekly ? "每周" : "5 小时", 10.5f, FontStyle.Regular, muted, new RectangleF(rect.X + 14, rect.Y + 9, 105, 19), StringAlignment.Near);
+        string number = window == null ? "—" : window.Remaining.ToString();
+        RingArt.Text(g, number, 29, FontStyle.Bold, accent, new RectangleF(rect.X + 12, rect.Y + 27, 78, 38), StringAlignment.Near);
+        if (window != null)
+        {
+            float percentX = rect.X + 15 + (number.Length * 18);
+            RingArt.Text(g, "%", 14, FontStyle.Regular, accent, new RectangleF(percentX, rect.Y + 38, 25, 24), StringAlignment.Near);
+        }
+        using (Pen track = new Pen(Color.FromArgb(dark ? 35 : 22, accent), 3))
+        using (Pen progress = new Pen(accent, 3))
+        {
+            track.StartCap = track.EndCap = progress.StartCap = progress.EndCap = LineCap.Round;
+            g.DrawLine(track, rect.X + 15, rect.Y + 75, rect.Right - 15, rect.Y + 75);
+            if (window != null && window.Remaining > 0)
+                g.DrawLine(progress, rect.X + 15, rect.Y + 75, rect.X + 15 + (rect.Width - 30) * window.Remaining / 100f, rect.Y + 75);
+        }
+        RingArt.Text(g, "重置 " + CodexQuotaRings.FormatReset(window), 8.5f, FontStyle.Regular, muted, new RectangleF(rect.X + 14, rect.Y + 85, 115, 18), StringAlignment.Near);
     }
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (e.Button != MouseButtons.Left) return;
-        float x = e.X / scale, y = e.Y / scale;
-        if (x >= 270 && y <= 52) Close();
+        if (e.Button == MouseButtons.Left && new RectangleF(298, 22, 27, 27).Contains(e.X / scale, e.Y / scale)) Close();
     }
-    protected override void Dispose(bool disposing)
-    { if (disposing) hint.Dispose(); base.Dispose(disposing); }
 }

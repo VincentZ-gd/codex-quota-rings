@@ -334,6 +334,8 @@ internal sealed class TrayContext : ApplicationContext
     private int refreshing;
     private readonly TaskbarRings dock;
     private QuotaDetails details;
+    private readonly System.Windows.Forms.Timer hoverTimer = new System.Windows.Forms.Timer();
+    private readonly HoverIntent hoverIntent = new HoverIntent();
     private readonly bool demo;
     private bool showOnFirstRead;
     private int consecutiveFailures;
@@ -383,6 +385,19 @@ internal sealed class TrayContext : ApplicationContext
         weekIcon.Visible = false;
         dock = new TaskbarRings(menu, ShowDetails, Refresh);
         dock.Show();
+        hoverTimer.Interval = 80;
+        hoverTimer.Tick += delegate {
+            Point pointer = Cursor.Position;
+            bool overRings = dock.PointerOverRings(pointer) && !menu.Visible;
+            bool overCard = details != null && details.Visible && details.ContainsPointer(pointer);
+            bool visible = details != null && details.Visible;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp() * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            int action = hoverIntent.Update(overRings, overCard, visible, now);
+            if (!dock.Visible || menu.Visible) { if (visible) details.Hide(); }
+            else if (action > 0) ShowDetails();
+            else if (action < 0) details.Hide();
+        };
+        hoverTimer.Start();
 
         timer.Interval = 5 * 60 * 1000;
         timer.Tick += delegate { Refresh(); };
@@ -446,7 +461,7 @@ internal sealed class TrayContext : ApplicationContext
             string statusDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexQuotaRings");
             Directory.CreateDirectory(statusDir);
             File.WriteAllText(Path.Combine(statusDir, "status.json"), new JavaScriptSerializer().Serialize(new {
-                version = "2.3.0-compact-refresh", successfulQuery = !stale && latest != null,
+                version = "2.4.0-hover-cards", successfulQuery = !stale && latest != null,
                 membershipExpiry = MembershipExpiry.Value,
                 fiveHoursRemaining = five == null ? (int?)null : five.Remaining,
                 weeklyRemaining = week == null ? (int?)null : week.Remaining,
@@ -473,16 +488,20 @@ internal sealed class TrayContext : ApplicationContext
 
     private void ShowDetails()
     {
-        if (details != null && !details.IsDisposed) { details.Close(); details = null; return; }
-        details = new QuotaDetails(dock.Bounds);
+        if (details == null || details.IsDisposed)
+        {
+            details = new QuotaDetails(dock.Bounds);
+            details.FormClosed += delegate { hoverIntent.Dismiss(); };
+        }
+        details.PlaceNear(dock.Bounds);
         details.UpdateValues(latest, stale, error);
-        details.Show();
-        details.Activate();
+        if (!details.Visible) details.Show(dock);
     }
 
     protected override void ExitThreadCore()
     {
         timer.Stop();
+        hoverTimer.Dispose();
         dock.Close();
         dock.Dispose();
         if (details != null && !details.IsDisposed) details.Dispose();

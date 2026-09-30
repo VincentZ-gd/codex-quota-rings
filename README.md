@@ -6,13 +6,15 @@ Lightweight, transparent Windows taskbar rings for your remaining Codex 5-hour a
 
 ![透明双圆环与刷新按钮（示例数据）](docs/preview.png)
 
+![悬停额度卡片（示例数据）](docs/hover-card.png)
+
 > 这是独立的社区工具，与 OpenAI 无隶属关系。界面当前为中文。预览使用模拟数据。
 
 ## 功能
 
 - 透明双圆环显示剩余百分比：`5h` 为 5 小时，`7d` 为每周。
 - 直接覆盖显示在主任务栏空白区域，不会随托盘图标折叠。
-- 点击圆环展开额度及重置时间；详情窗口不产生额外任务栏图标。
+- 悬停圆环自动浮现额度卡片；离开圆环及卡片后自动收起，不抢焦点、不产生额外任务栏图标。
 - Exp 下方的小刷新按钮直接查询；默认每 5 分钟自动刷新。
 - 横向拖动定位、浅色/深色主题适配、DPI 缩放、可选开机启动。
 - 可手动填写 `Exp` 会员到期日，日期保存在本机。
@@ -20,9 +22,9 @@ Lightweight, transparent Windows taskbar rings for your remaining Codex 5-hour a
 
 ## 下载与运行
 
-从 [Releases](https://github.com/VincentZ-gd/codex-quota-rings/releases) 下载 `CodexQuotaRings-v2.3.0-windows.zip`，完整解压后双击 `CodexQuotaRings.exe`。
+从 [Releases](https://github.com/VincentZ-gd/codex-quota-rings/releases) 下载 `CodexQuotaRings-v2.4.0-windows.zip`，完整解压后双击 `CodexQuotaRings.exe`。
 
-也可直接下载 [Windows 压缩包](https://github.com/VincentZ-gd/codex-quota-rings/raw/refs/heads/main/downloads/CodexQuotaRings-v2.3.0-windows.zip)，对应校验值见 [SHA256SUMS.txt](downloads/SHA256SUMS.txt)。仓库下载包在本机构建，Release 下载包由 GitHub Actions 构建，两者分别提供校验值。
+直接下载：[Windows 压缩包](https://github.com/VincentZ-gd/codex-quota-rings/releases/download/v2.4.0/CodexQuotaRings-v2.4.0-windows.zip) · [SHA-256 校验值](https://github.com/VincentZ-gd/codex-quota-rings/releases/download/v2.4.0/SHA256SUMS.txt)。Release 下载包由 GitHub Actions 构建。
 
 要求：Windows 10/11、.NET Framework 4.6 或更新版本，以及支持 `app-server` 且已使用 ChatGPT 账号登录的 Codex CLI。本机验证环境为 Windows 11；其他任务栏布局尚未全面验证。
 
@@ -42,11 +44,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 | 操作 | 效果 |
 | --- | --- |
-| 点击圆环 | 打开/关闭详情 |
+| 悬停圆环 | 约 0.2 秒后展开详情；移开约 0.28 秒后收起 |
+| 移入卡片 / 点击圆环 | 保持显示 / 立即查看详情 |
 | 点击 Exp 下方回转箭头 | 立即刷新；查询中显示省略号 |
 | 拖动圆环 | 调整横向位置 |
 | 右键圆环 | 刷新、设置 Exp、开机启动、恢复位置、退出 |
-| 详情窗口按 Esc / 点击 × | 收起详情 |
+| 点击卡片 × | 收起详情，重新移入圆环可再次展开 |
 
 ## 查询方式与隐私
 
@@ -87,7 +90,7 @@ Exp 是**手动记录**的日期，不会自动续期，也不会跟随账号切
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-脚本构建 GUI 程序，运行已有额度解析自检，并生成 `dist\CodexQuotaRings-v2.3.0-windows.zip` 及 `SHA256SUMS.txt`。自检使用模拟响应，不需要登录或网络。
+脚本构建 GUI 程序，运行额度解析与悬停交互自检，并生成 `dist\CodexQuotaRings-v2.4.0-windows.zip` 及 `SHA256SUMS.txt`。自检使用模拟响应，不需要登录或网络。
 
 `src/CodexQuotaRings.cs` 负责 CLI 查询、解析及菜单；`src/TaskbarView.cs` 负责绘图、任务栏定位和详情窗口。
 
