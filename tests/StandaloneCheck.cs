@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 
 internal static class StandaloneCheck
 {
@@ -11,6 +12,7 @@ internal static class StandaloneCheck
     {
         string scratch = Path.Combine(Path.GetTempPath(), "QuotaRings-test-" + Guid.NewGuid().ToString("N"));
         string previousCli = Environment.GetEnvironmentVariable("CODEX_QUOTA_CODEX_EXE");
+        Encoding previousInputEncoding = Console.InputEncoding;
         try
         {
             Directory.CreateDirectory(scratch);
@@ -35,6 +37,14 @@ internal static class StandaloneCheck
             Environment.SetEnvironmentVariable("CODEX_QUOTA_CODEX_EXE", Path.GetFullPath(args[0]));
             QuotaResult result = CodexQuotaRings.Query();
             Assert(result.FiveHours != null && result.FiveHours.Remaining == 79 && result.Weekly != null && result.Weekly.Remaining == 88, "Standalone RPC failed");
+            // A UTF-8 console can otherwise make Process.StandardInput emit a
+            // preamble. Exercise it as well as a legacy Windows console page.
+            foreach (Encoding encoding in new Encoding[] { Encoding.UTF8, Encoding.GetEncoding(1252) })
+            {
+                Console.InputEncoding = encoding;
+                QuotaResult encodedResult = CodexQuotaRings.Query();
+                Assert(encodedResult.FiveHours != null && encodedResult.FiveHours.Remaining == 79, "RPC depends on console input encoding");
+            }
             foreach (Process process in Process.GetProcessesByName("FakeCodex"))
                 using (process) Assert(process.HasExited, "CLI child left running between refreshes");
 
@@ -57,6 +67,7 @@ internal static class StandaloneCheck
         finally
         {
             Environment.SetEnvironmentVariable("CODEX_QUOTA_CODEX_EXE", previousCli);
+            Console.InputEncoding = previousInputEncoding;
             // Only remove files created here; no recursive filesystem deletion.
             if (Directory.Exists(scratch))
             {
