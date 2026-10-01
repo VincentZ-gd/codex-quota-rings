@@ -15,16 +15,18 @@ Lightweight, transparent Windows taskbar rings for your remaining Codex 5-hour a
 - 透明双圆环显示剩余百分比：`5h` 为 5 小时，`7d` 为每周。
 - 直接覆盖显示在主任务栏空白区域，不会随托盘图标折叠。
 - 悬停圆环自动浮现额度卡片；离开圆环及卡片后自动收起，不抢焦点、不产生额外任务栏图标。
+- 窗口切换及任务栏预览时保持圆环显示；任务栏短暂移出屏幕时保留原位置。
 - Exp 下方的小刷新按钮直接查询；默认每 5 分钟自动刷新。
 - 横向拖动定位、浅色/深色主题适配、DPI 缩放、可选开机启动。
 - 可手动填写 `Exp` 会员到期日，日期保存在本机。
-- Codex 桌面窗口关闭后，仍可通过已登录的本机 Codex CLI 查询。
+- 完全退出 Codex 桌面程序后，圆环独立运行，仍可自动刷新和手动查询。
+- 启动时恢复上次成功的额度读数；离线或登录失效时以灰色标记旧数据与查询时间。
 
 ## 下载与运行
 
-从 [Releases](https://github.com/VincentZ-gd/codex-quota-rings/releases) 下载 `CodexQuotaRings-v2.4.0-windows.zip`，完整解压后双击 `CodexQuotaRings.exe`。
+从 [Releases](https://github.com/VincentZ-gd/codex-quota-rings/releases) 下载最新的 Windows 压缩包，完整解压后双击 `CodexQuotaRings.exe`。
 
-直接下载：[Windows 压缩包](https://github.com/VincentZ-gd/codex-quota-rings/releases/download/v2.4.0/CodexQuotaRings-v2.4.0-windows.zip) · [SHA-256 校验值](https://github.com/VincentZ-gd/codex-quota-rings/releases/download/v2.4.0/SHA256SUMS.txt)。Release 下载包由 GitHub Actions 构建。
+下载包与 SHA-256 校验值见对应 Release。Release 下载包由 GitHub Actions 构建。
 
 要求：Windows 10/11、.NET Framework 4.6 或更新版本，以及支持 `app-server` 且已使用 ChatGPT 账号登录的 Codex CLI。本机验证环境为 Windows 11；其他任务栏布局尚未全面验证。
 
@@ -57,9 +59,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 认证由官方 CLI 处理。本工具不直接读取或保存账号令牌、浏览器 Cookie 或 API Key，无遥测、无自动上传功能。
 
+### 关闭 Codex 后继续查询
+
+圆环是独立的 Windows 进程。每次刷新自行启动官方 CLI、读取额度并关闭查询子进程，两次刷新之间不常驻 CLI。后台查询明确传入 Windows 用户目录及 Codex 配置目录，并从用户目录启动，避免依赖桌面程序的运行环境或项目配置。
+
+关闭 Codex 桌面程序不会删除其 CLI 文件和已保存的登录，因此圆环可以继续查询。需要保持本机登录有效、网络可用，并让圆环继续运行。勾选右键菜单中的“开机启动”可在下次登录 Windows 后自动启动圆环。**退出登录**会使查询失效；**卸载 Codex**可能移除 CLI，这时需另外安装官方 CLI 并设置其路径。无需为额度查询开通 API Key。
+
+官方登录若设置为仅存内存的 `ephemeral` 模式，独立查询无法复用桌面进程的登录。需使用官方 CLI 支持的持久登录方式，见 [官方认证文档](https://learn.chatgpt.com/docs/auth)。
+
 本地数据：
 
 - `%LOCALAPPDATA%\CodexQuotaRings\status.json`：最近的额度读数、更新时间、Exp 和显示位置，用于本地诊断；不包含认证凭据。
+- `%LOCALAPPDATA%\CodexQuotaRings\quota-cache.json`：上次成功查询的额度与时间，重启后先显示为旧数据。缓存不包含凭据，不代表实时额度；账号切换后，以新查询结果为准。
+- `%LOCALAPPDATA%\CodexQuotaRings\cli-state`：额度查询子进程的 SQLite 运行状态。使用官方 `CODEX_SQLITE_HOME` 设置；若用户已显式配置该环境变量或 `sqlite_home`，则遵循其设置。
 - `HKCU\Software\CodexQuotaRings`：横向位置和手动填写的 Exp。
 - 启用开机启动时，在当前用户的 `Run` 注册表项中保存启动路径。
 
@@ -71,13 +83,13 @@ Exp 是**手动记录**的日期，不会自动续期，也不会跟随账号切
 
 目前查阅的官方公开账号及额度接口没有提供会员到期日字段。`resetsAt` 是额度重置时间；额度重置奖励中的 `expiresAt` 是奖励有效期，不能用于推算会员到期日。自动续费的下一次扣款日也不等同于会员终止日期。
 
-圆环显示的是**剩余**额度。灰色表示当前查询失败后保留的上次读数；横线表示暂无对应窗口数据。查询失败的前三次重试间隔为 30 秒，之后恢复 5 分钟。重新启动后的首次查询若失败，则没有跨启动缓存可显示。
+圆环显示的是**剩余**额度。灰色表示启动恢复的缓存或查询失败后保留的旧读数；横线表示暂无对应窗口数据。查询失败的前三次重试间隔为 30 秒，之后恢复 5 分钟。缓存中的重置时间到达后，不会自行假定额度已恢复，必须以新查询结果为准。
 
 ## 已知限制
 
-- 使用独立透明置顶窗口覆盖任务栏，未使用 Windows 原生 DeskBand，也不会为任务栏应用图标预留空间；若重叠可手动拖动。
+- 以透明子窗口挂在 Explorer 任务栏上，减少普通窗口最小化和显示桌面动画对圆环的影响；未使用 DeskBand，也不会为其他应用图标预留空间，有重叠时请手动拖动。系统拒绝挂载时使用独立置顶窗口兼容模式。
 - 主要面向主显示器底部的水平任务栏。多显示器、垂直任务栏及其他 Shell 未完整测试。
-- 任务栏持续隐藏超过 2 秒后圆环跟随隐藏。全屏应用中圆环仍可能显示。
+- 挂载模式下圆环随任务栏一起自动隐藏。兼容模式下，任务栏持续隐藏超过 2 秒后圆环隐藏。
 - 需要有效的 Codex 登录和网络连接；登录失效时，请在 Codex 中重新登录。
 - 实测单次常驻工作集约 49 MB，具体随系统变化；刷新期间 CLI 子进程会额外占用内存。
 - 发布文件尚未进行代码签名。
@@ -90,7 +102,7 @@ Exp 是**手动记录**的日期，不会自动续期，也不会跟随账号切
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-脚本构建 GUI 程序，运行额度解析与悬停交互自检，并生成 `dist\CodexQuotaRings-v2.4.0-windows.zip` 及 `SHA256SUMS.txt`。自检使用模拟响应，不需要登录或网络。
+脚本构建 GUI 程序，运行额度解析、悬停交互、独立后台查询、缓存和任务栏定位自检，并生成 `dist\CodexQuotaRings-v2.5.2-windows.zip` 及 `SHA256SUMS.txt`。自检使用严格只允许初始化与额度查询的模拟 CLI，不需要登录或网络。窗口检查验证原生置顶、非激活属性、DWM 接受 Peek 排除设置，以及任务栏过渡与自动隐藏恢复。
 
 `src/CodexQuotaRings.cs` 负责 CLI 查询、解析及菜单；`src/TaskbarView.cs` 负责绘图、任务栏定位和详情窗口。
 

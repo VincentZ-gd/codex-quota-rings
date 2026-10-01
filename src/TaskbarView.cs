@@ -1,10 +1,12 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+[assembly: System.Reflection.AssemblyFileVersion("2.5.2.0")]
 
 internal static class MembershipExpiry
 {
@@ -189,6 +191,13 @@ internal static class NativeDock
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string title);
     [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] internal static extern IntPtr GetParent(IntPtr window);
+    [DllImport("user32.dll")] internal static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("user32.dll", SetLastError = true)] internal static extern IntPtr SetParent(IntPtr window, IntPtr parent);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] internal static extern int GetWindowLong(IntPtr window, int index);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)] internal static extern int SetWindowLong(IntPtr window, int index, int value);
+    [DllImport("user32.dll")] internal static extern bool ScreenToClient(IntPtr window, ref Point point);
     [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int size);
@@ -196,13 +205,25 @@ internal static class NativeDock
     internal delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint threadId, uint time);
     [DllImport("user32.dll")] internal static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
     [DllImport("user32.dll")] internal static extern bool UnhookWinEvent(IntPtr hook);
+    [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+
+    internal static int KeepVisibleDuringPeek(IntPtr window)
+    {
+        // Alt+Tab / taskbar thumbnail previews can fade an otherwise visible,
+        // topmost window. Visibility and z-order alone do not prevent this.
+        int enabled = 1;
+        try { return DwmSetWindowAttribute(window, 12 /* DWMWA_EXCLUDED_FROM_PEEK */, ref enabled, sizeof(int)); }
+        catch (DllNotFoundException) { return unchecked((int)0x80004001); }
+        catch (EntryPointNotFoundException) { return unchecked((int)0x80004001); }
+    }
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr dc);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
     [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr value);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr value);
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr window, IntPtr destDc, ref Point dest, ref Size size, IntPtr sourceDc, ref Point source, int color, ref Blend blend, int flags);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr window, IntPtr destDc, IntPtr dest, ref Size size, IntPtr sourceDc, ref Point source, int color, ref Blend blend, int flags);
 
     internal static float Dpi(IntPtr window)
     {
@@ -218,13 +239,28 @@ internal static class NativeDock
         IntPtr old = SelectObject(memoryDc, bitmap);
         try
         {
-            Point dest = new Point(form.Left, form.Top), source = new Point(0, 0);
+            Point source = new Point(0, 0);
             Size size = new Size(image.Width, image.Height);
             Blend blend = new Blend { Op = 0, Flags = 0, Alpha = 255, Format = 1 };
-            if (!UpdateLayeredWindow(form.Handle, screenDc, ref dest, ref size, memoryDc, ref source, 0, ref blend, 2))
+            // Preserve native placement; a taskbar child uses parent coordinates,
+            // whereas a detached details card uses screen coordinates.
+            if (!UpdateLayeredWindow(form.Handle, screenDc, IntPtr.Zero, ref size, memoryDc, ref source, 0, ref blend, 2))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         }
         finally { SelectObject(memoryDc, old); DeleteObject(bitmap); DeleteDC(memoryDc); ReleaseDC(IntPtr.Zero, screenDc); }
+    }
+}
+
+internal sealed class TaskbarVisibility
+{
+    private long hiddenSince = -1;
+    // 0: keep the last visible position; 1: use the visible taskbar bounds;
+    // -1: the taskbar has remained hidden long enough to hide the rings.
+    internal int Update(bool hidden, long milliseconds)
+    {
+        if (!hidden) { hiddenSince = -1; return 1; }
+        if (hiddenSince < 0) hiddenSince = milliseconds;
+        return milliseconds - hiddenSince >= 2000 ? -1 : 0;
     }
 }
 
@@ -243,9 +279,11 @@ internal sealed class TaskbarRings : Form
     private Point dragStart, originalLocation;
     private bool dragging, moved;
     private bool refreshHover, refreshPressed, refreshing;
-    private long hiddenSince;
+    private readonly TaskbarVisibility taskbarVisibility = new TaskbarVisibility();
     private IntPtr foregroundHook;
+    private IntPtr taskbarHook, observedTaskbar;
     private NativeDock.WinEventDelegate foregroundCallback;
+    private NativeDock.WinEventDelegate taskbarCallback;
     private string expiry = MembershipExpiry.Value;
 
     internal TaskbarRings(ContextMenuStrip menu, Action details, Action refreshAction)
@@ -254,6 +292,7 @@ internal sealed class TaskbarRings : Form
         FormBorderStyle = FormBorderStyle.None;
         AutoScaleMode = AutoScaleMode.None;
         ShowInTaskbar = false;
+        TopMost = false;
         StartPosition = FormStartPosition.Manual;
         ContextMenuStrip = menu;
         showDetails = details;
@@ -270,22 +309,65 @@ internal sealed class TaskbarRings : Form
         placementTimer.Tick += delegate { PlaceOnTaskbar(); };
         Shown += delegate {
             PlaceOnTaskbar(); Redraw(); placementTimer.Start();
-            if (foregroundHook == IntPtr.Zero)
+            if (!IsEmbedded && foregroundHook == IntPtr.Zero)
             {
                 foregroundCallback = delegate {
-                    if (!IsDisposed && IsHandleCreated)
-                        BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) PlaceOnTaskbar(); });
+                    // OUTOFCONTEXT hooks run on the registering UI thread.
+                    // Do not queue another message behind painting / shell work.
+                    if (!IsEmbedded) KeepAboveTaskbar();
                 };
-                foregroundHook = NativeDock.SetWinEventHook(3, 3, IntPtr.Zero, foregroundCallback, 0, 0, 0);
+                foregroundHook = NativeDock.SetWinEventHook(3, 3, IntPtr.Zero, foregroundCallback, 0, 0, 2 /* SKIPOWNPROCESS */);
             }
         };
         hint.SetToolTip(this, "");
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (!IsEmbedded) NativeDock.KeepVisibleDuringPeek(Handle);
+        // Form.CreateHandle assigns its hidden taskbar owner after this event.
+        // Reattach after that work also when a native handle is recreated.
+        BeginInvoke(new Action(delegate { if (!IsDisposed && !Disposing) PlaceOnTaskbar(); }));
+    }
     protected override CreateParams CreateParams
     {
-        get { CreateParams p = base.CreateParams; p.ExStyle |= 0x80000 | 0x80 | 0x08000000; return p; }
+        get
+        {
+            CreateParams p = base.CreateParams;
+            p.ExStyle |= 0x80000 | 0x80 | 0x08000000;
+            IntPtr taskbar = NativeDock.FindWindow("Shell_TrayWnd", null);
+            if (taskbar != IntPtr.Zero)
+            {
+                // A taskbar child is outside the set of desktop windows animated
+                // or minimized by Explorer's Show Desktop operation.
+                p.Style = (p.Style & ~unchecked((int)0x80000000)) | 0x40000000;
+                p.ExStyle &= ~8;
+                p.Parent = taskbar;
+            }
+            return p;
+        }
+    }
+
+    internal bool IsEmbedded
+    {
+        get
+        {
+            if (!IsHandleCreated || (NativeDock.GetWindowLong(Handle, -16) & 0x40000000) == 0) return false;
+            IntPtr parent = NativeDock.GetParent(Handle);
+            return parent != IntPtr.Zero && parent == NativeDock.FindWindow("Shell_TrayWnd", null);
+        }
+    }
+
+    internal Rectangle ScreenBounds
+    {
+        get
+        {
+            NativeDock.Rect rect;
+            return IsHandleCreated && NativeDock.GetWindowRect(Handle, out rect)
+                ? Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom) : Bounds;
+        }
     }
 
     internal void UpdateValues(QuotaWindow nextFive, QuotaWindow nextWeek, bool isStale)
@@ -323,18 +405,24 @@ internal sealed class TaskbarRings : Form
         IntPtr taskbar = NativeDock.FindWindow("Shell_TrayWnd", null);
         NativeDock.Rect rect;
         if (taskbar == IntPtr.Zero || !NativeDock.GetWindowRect(taskbar, out rect)) return;
+        EnsureTaskbarParent(taskbar);
+        ObserveTaskbar(taskbar);
         Rectangle screen = Screen.FromHandle(taskbar).Bounds;
-        bool hidden = !NativeDock.IsWindowVisible(taskbar) || rect.Top >= screen.Bottom - 2 || rect.Bottom <= screen.Top + 2;
+        bool hidden = !NativeDock.IsWindowVisible(taskbar) || rect.Top >= screen.Bottom - 2 || rect.Bottom <= screen.Top + 2 || rect.Bottom - rect.Top < 8;
         // Foreground changes and switcher overlays must never hide the quota display.
         // Only a taskbar that stays physically hidden for two seconds hides this window.
-        long now = System.Diagnostics.Stopwatch.GetTimestamp();
-        if (hidden)
+        long now = (long)(System.Diagnostics.Stopwatch.GetTimestamp() * (1000.0 / System.Diagnostics.Stopwatch.Frequency));
+        // Embedded rings naturally move/clip with auto-hide. Do not explicitly
+        // hide and re-show their HWND during shell animations.
+        int placement = IsEmbedded ? (hidden ? 0 : 1) : taskbarVisibility.Update(hidden, now);
+        if (placement != 1)
         {
-            if (hiddenSince == 0) hiddenSince = now;
-            if ((now - hiddenSince) / (double)System.Diagnostics.Stopwatch.Frequency >= 2)
-            { if (Visible) Hide(); return; }
+            if (placement < 0) { if (Visible) Hide(); }
+            else KeepAboveTaskbar();
+            // In the grace period, keep both visibility AND coordinates. Moving
+            // to the hidden taskbar's offscreen rectangle was still hiding us.
+            return;
         }
-        else hiddenSince = 0;
         float nextScale = NativeDock.Dpi(taskbar);
         bool nextDark = RingArt.IsDark();
         bool rerender = Math.Abs(nextScale - scale) > 0.01 || nextDark != dark;
@@ -349,13 +437,67 @@ internal sealed class TaskbarRings : Form
         maxX = Math.Max(minX, rightEdge - width - (int)(4 * scale));
         int x = Math.Max(minX, Math.Min(maxX, defaultX + offset));
         int y = rect.Top + (rect.Bottom - rect.Top - height) / 2;
+        if (IsEmbedded)
+        {
+            NativeDock.Point origin = new NativeDock.Point(0, 0);
+            NativeDock.ScreenToClient(taskbar, ref origin);
+            x += origin.X; y += origin.Y;
+            defaultX += origin.X; minX += origin.X; maxX += origin.X;
+        }
         if (!Visible) Show();
         if (Left != x || Top != y || Width != width || Height != height || rerender)
         {
-            NativeDock.SetWindowPos(Handle, new IntPtr(-1), x, y, width, height, 0x10);
+            NativeDock.SetWindowPos(Handle, IsEmbedded ? IntPtr.Zero : new IntPtr(-1), x, y, width, height, 0x10);
             Redraw();
         }
-        else NativeDock.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13);
+        else KeepAboveTaskbar();
+    }
+
+    private void KeepAboveTaskbar()
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated || !Visible) return;
+        if (IsEmbedded && NativeDock.GetWindow(Handle, 3 /* GW_HWNDPREV */) == IntPtr.Zero) return;
+        NativeDock.SetWindowPos(Handle, IsEmbedded ? IntPtr.Zero : new IntPtr(-1), 0, 0, 0, 0,
+            0x13 /* NOMOVE | NOSIZE | NOACTIVATE */ | 0x200 /* NOOWNERZORDER */);
+    }
+
+    private void EnsureTaskbarParent(IntPtr taskbar)
+    {
+        // Explorer may replace the native taskbar window after a restart.
+        IntPtr window = Handle;
+        if (!NativeDock.IsWindow(window)) { RecreateHandle(); window = Handle; }
+        if (NativeDock.GetParent(window) == taskbar && IsEmbedded) return;
+        int style = NativeDock.GetWindowLong(window, -16);
+        NativeDock.SetWindowLong(window, -16, (style & ~unchecked((int)0x80000000)) | 0x40000000);
+        NativeDock.SetParent(window, taskbar);
+        if (NativeDock.GetParent(window) != taskbar)
+        {
+            // Keep a usable top-level fallback if shell parenting is rejected.
+            NativeDock.SetWindowLong(window, -16, (style & ~0x40000000) | unchecked((int)0x80000000));
+            NativeDock.SetParent(window, IntPtr.Zero);
+            NativeDock.KeepVisibleDuringPeek(window);
+            return;
+        }
+        NativeDock.SetWindowPos(window, IntPtr.Zero, 0, 0, 0, 0,
+            0x37 /* FRAMECHANGED | NOACTIVATE | NOMOVE | NOSIZE */);
+    }
+
+    private void ObserveTaskbar(IntPtr taskbar)
+    {
+        if (observedTaskbar == taskbar && taskbarHook != IntPtr.Zero) return;
+        if (taskbarHook != IntPtr.Zero) NativeDock.UnhookWinEvent(taskbarHook);
+        observedTaskbar = taskbar;
+        uint shellProcess;
+        NativeDock.GetWindowThreadProcessId(taskbar, out shellProcess);
+        if (shellProcess == 0) { taskbarHook = IntPtr.Zero; return; }
+        taskbarCallback = delegate(IntPtr hook, uint kind, IntPtr window, int objectId, int childId, uint thread, uint time) {
+            if (IsDisposed || Disposing || !IsHandleCreated || window != observedTaskbar || objectId != 0) return;
+            // Explorer may raise its taskbar after the foreground event. React
+            // to its final ordering immediately, rather than waiting one second.
+            if (kind == 0x8004 /* REORDER */) KeepAboveTaskbar();
+            else if (kind == 0x8002 || kind == 0x8003 || kind == 0x800B) PlaceOnTaskbar();
+        };
+        taskbarHook = NativeDock.SetWinEventHook(0x8002, 0x800B, IntPtr.Zero, taskbarCallback, shellProcess, 0, 2);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -401,7 +543,13 @@ internal sealed class TaskbarRings : Form
     { base.OnMouseLeave(e); refreshHover = false; Cursor = Cursors.Default; Redraw(); }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { if (foregroundHook != IntPtr.Zero) NativeDock.UnhookWinEvent(foregroundHook); placementTimer.Dispose(); hint.Dispose(); }
+        if (disposing)
+        {
+            if (foregroundHook != IntPtr.Zero) NativeDock.UnhookWinEvent(foregroundHook);
+            if (taskbarHook != IntPtr.Zero) NativeDock.UnhookWinEvent(taskbarHook);
+            foregroundHook = taskbarHook = IntPtr.Zero;
+            placementTimer.Dispose(); hint.Dispose();
+        }
         base.Dispose(disposing);
     }
 }
@@ -499,7 +647,7 @@ internal sealed class QuotaDetails : Form
             Card(g, new RectangleF(177, 80, 141, 111), latest == null ? null : latest.Weekly, true, stale, dark, muted);
             Color statusColor = stale ? Color.FromArgb(218, 151, 38) : latest == null ? muted : Color.FromArgb(20, 168, 126);
             using (SolidBrush dot = new SolidBrush(statusColor)) g.FillEllipse(dot, 29, 207, 4, 4);
-            string status = stale ? (latest == null ? "连接暂不可用 · 自动重试中" : "离线 · 显示上次读数") : latest == null ? "正在查询额度…" : "更新于 " + latest.CheckedAt.ToString("HH:mm") + "  ·  每 5 分钟刷新";
+            string status = stale ? (latest == null ? "连接暂不可用 · 自动重试中" : "旧数据 · " + latest.CheckedAt.ToString("MM-dd HH:mm") + " · 自动重试中") : latest == null ? "正在查询额度…" : "更新于 " + latest.CheckedAt.ToString("HH:mm") + "  ·  每 5 分钟刷新";
             RingArt.Text(g, status, 9, FontStyle.Regular, muted, new RectangleF(39, 199, 277, 20), StringAlignment.Near);
         }
         return bitmap;

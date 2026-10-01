@@ -35,6 +35,7 @@ internal static class CodexQuotaRings
     private const string AppName = "Codex Quota Rings";
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunName = "CodexQuotaRings";
+    internal const string Version = "2.5.2";
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
     [STAThread]
@@ -138,7 +139,7 @@ internal static class CodexQuotaRings
         }
     }
 
-    private static string FindCodex()
+    internal static string FindCodex()
     {
         string explicitPath = Environment.GetEnvironmentVariable("CODEX_QUOTA_CODEX_EXE");
         if (!String.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath)) return explicitPath;
@@ -171,8 +172,46 @@ internal static class CodexQuotaRings
         throw new Exception("找不到 Codex CLI。请设置 CODEX_QUOTA_CODEX_EXE 环境变量。 ");
     }
 
-    internal static QuotaResult Query()
+    internal static void ConfigureQueryEnvironment(ProcessStartInfo start, string profile)
     {
+        EnsureChildEnvironment(start);
+        // ProcessStartInfo has its own environment snapshot. Configure the child
+        // before Start(), rather than changing this process's environment later.
+        // A fresh CLI reuses persisted official login credentials, even when the
+        // desktop app is closed; it never needs a desktop process or IPC bridge.
+        if (String.IsNullOrEmpty(start.EnvironmentVariables["CODEX_HOME"]))
+            start.EnvironmentVariables["CODEX_HOME"] = Path.Combine(profile, ".codex");
+        if (String.IsNullOrEmpty(start.EnvironmentVariables["HOME"]))
+            start.EnvironmentVariables["HOME"] = profile;
+        // A quota helper must not inherit the desktop app's live tools pipe or
+        // task identity. Those belong to the launching task and can disappear
+        // when the desktop exits (or be inaccessible to a detached caller).
+        foreach (string key in new [] { "CODEX_APP_TOOLS_PIPE_PATH", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY", "CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY" })
+            start.EnvironmentVariables.Remove(key);
+        start.WorkingDirectory = profile;
+    }
+
+    internal static void EnsureChildEnvironment(ProcessStartInfo start)
+    {
+        try { int count = start.EnvironmentVariables.Count; }
+        catch (ArgumentException)
+        {
+            // Some launchers supply both Path and PATH. Framework's lazy getter
+            // leaves a partially populated case-insensitive dictionary when it
+            // encounters that duplicate. Rebuild only the child's environment.
+            var environment = start.EnvironmentVariables;
+            environment.Clear();
+            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+                environment[Convert.ToString(entry.Key)] = Convert.ToString(entry.Value);
+        }
+    }
+
+    internal static ProcessStartInfo QueryStartInfo()
+    {
+        string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (String.IsNullOrEmpty(profile)) profile = Environment.GetEnvironmentVariable("USERPROFILE");
+        if (String.IsNullOrEmpty(profile) || !Directory.Exists(profile))
+            throw new Exception("找不到 Windows 用户目录，无法加载 Codex 登录。");
         var start = new ProcessStartInfo(FindCodex(), "app-server --listen stdio://");
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
@@ -180,19 +219,21 @@ internal static class CodexQuotaRings
         start.RedirectStandardOutput = true;
         start.RedirectStandardError = true;
         start.StandardOutputEncoding = Encoding.UTF8;
-        // Some packaged Codex builds do not resolve the user home in a detached process.
-        // Point Codex at its existing profile when no explicit profile is configured.
-        if (String.IsNullOrEmpty(Environment.GetEnvironmentVariable("CODEX_HOME")))
+        ConfigureQueryEnvironment(start, profile);
+        if (String.IsNullOrEmpty(start.EnvironmentVariables["CODEX_SQLITE_HOME"]))
         {
-            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string config = Path.Combine(profile, ".codex");
-            if (Directory.Exists(config)) Environment.SetEnvironmentVariable("CODEX_HOME", config);
-            if (String.IsNullOrEmpty(Environment.GetEnvironmentVariable("HOME")) && Directory.Exists(profile))
-                Environment.SetEnvironmentVariable("HOME", profile);
+            string state = Path.Combine(DataDirectory, "cli-state");
+            Directory.CreateDirectory(state);
+            start.EnvironmentVariables["CODEX_SQLITE_HOME"] = state;
         }
+        return start;
+    }
+
+    internal static QuotaResult Query()
+    {
         using (Process proc = new Process())
         {
-            proc.StartInfo = start;
+            proc.StartInfo = QueryStartInfo();
             if (!proc.Start()) throw new Exception("无法启动 Codex app-server。");
             var stderr = new StringBuilder();
             proc.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs eventArgs)
@@ -202,7 +243,7 @@ internal static class CodexQuotaRings
             proc.BeginErrorReadLine();
             try
             {
-                Send(proc, "{\"method\":\"initialize\",\"id\":1,\"params\":{\"clientInfo\":{\"name\":\"codex_quota_rings\",\"title\":\"Codex Quota Rings\",\"version\":\"1.0.0\"}}}");
+                Send(proc, "{\"method\":\"initialize\",\"id\":1,\"params\":{\"clientInfo\":{\"name\":\"codex_quota_rings\",\"title\":\"Codex Quota Rings\",\"version\":\"" + Version + "\"}}}");
                 Dictionary<string, object> init = ReadResponse(proc, 1, 20000, stderr);
                 CheckError(init);
                 Send(proc, "{\"method\":\"initialized\",\"params\":{}}");
@@ -217,6 +258,37 @@ internal static class CodexQuotaRings
                 try { proc.WaitForExit(2000); } catch { }
             }
         }
+    }
+
+    internal static string DataDirectory
+    {
+        get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexQuotaRings"); }
+    }
+
+    internal static void SaveCache(QuotaResult result, string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path));
+        // Cache contains only quota numbers and timestamps, never credentials.
+        string temporary = path + ".tmp";
+        File.WriteAllText(temporary, new JavaScriptSerializer().Serialize(result), Encoding.UTF8);
+        if (File.Exists(path)) File.Replace(temporary, path, null);
+        else File.Move(temporary, path);
+    }
+
+    internal static QuotaResult LoadCache(string path)
+    {
+        try
+        {
+            QuotaResult result = new JavaScriptSerializer().Deserialize<QuotaResult>(File.ReadAllText(path));
+            if (result != null) result.CheckedAt = result.CheckedAt.ToLocalTime();
+            if (result == null || result.CheckedAt == DateTime.MinValue ||
+                result.CheckedAt > DateTime.Now.AddMinutes(5) ||
+                (result.FiveHours == null && result.Weekly == null)) return null;
+            foreach (QuotaWindow window in new [] { result.FiveHours, result.Weekly })
+                if (window != null && (window.Remaining < 0 || window.Remaining > 100 || window.ResetsAt < 0)) return null;
+            return result;
+        }
+        catch { return null; }
     }
 
     private static void CheckError(Dictionary<string, object> response)
@@ -268,6 +340,8 @@ internal static class CodexQuotaRings
         parsed.CheckedAt = DateTime.Now;
         AcceptWindow(parsed, AsObject(Get(bucket, "primary")));
         AcceptWindow(parsed, AsObject(Get(bucket, "secondary")));
+        if (parsed.FiveHours == null && parsed.Weekly == null)
+            throw new Exception("账号没有返回 5 小时或每周额度窗口。");
         return parsed;
     }
 
@@ -407,7 +481,13 @@ internal sealed class TrayContext : ApplicationContext
             latest = new QuotaResult { FiveHours = new QuotaWindow { Remaining = 52, ResetsAt = DateTimeOffset.Now.AddHours(2).ToUnixTimeSeconds() }, Weekly = new QuotaWindow { Remaining = 18, ResetsAt = DateTimeOffset.Now.AddDays(3).ToUnixTimeSeconds() }, CheckedAt = DateTime.Now };
             UpdateIcons();
         }
-        else Refresh();
+        else
+        {
+            latest = CodexQuotaRings.LoadCache(Path.Combine(CodexQuotaRings.DataDirectory, "quota-cache.json"));
+            stale = latest != null;
+            UpdateIcons();
+            Refresh();
+        }
     }
 
     private void OnClick(object sender, MouseEventArgs args)
@@ -424,7 +504,11 @@ internal sealed class TrayContext : ApplicationContext
         {
             QuotaResult result = null;
             string failure = null;
-            try { result = CodexQuotaRings.Query(); }
+            try
+            {
+                result = CodexQuotaRings.Query();
+                try { CodexQuotaRings.SaveCache(result, Path.Combine(CodexQuotaRings.DataDirectory, "quota-cache.json")); } catch { }
+            }
             catch (Exception ex) { failure = ex.Message; }
             try
             {
@@ -458,16 +542,18 @@ internal sealed class TrayContext : ApplicationContext
         if (details != null && !details.IsDisposed) details.UpdateValues(latest, stale, error);
         try
         {
-            string statusDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexQuotaRings");
+            string statusDir = CodexQuotaRings.DataDirectory;
             Directory.CreateDirectory(statusDir);
             File.WriteAllText(Path.Combine(statusDir, "status.json"), new JavaScriptSerializer().Serialize(new {
-                version = "2.4.0-hover-cards", successfulQuery = !stale && latest != null,
+                version = CodexQuotaRings.Version, successfulQuery = !stale && latest != null,
+                querySource = "standalone-codex-cli", lastError = error,
                 membershipExpiry = MembershipExpiry.Value,
                 fiveHoursRemaining = five == null ? (int?)null : five.Remaining,
                 weeklyRemaining = week == null ? (int?)null : week.Remaining,
                 checkedAt = latest == null ? null : latest.CheckedAt.ToString("o"),
                 taskbarVisible = dock.Visible,
-                position = new { x = dock.Left, y = dock.Top, width = dock.Width, height = dock.Height }
+                position = new { x = dock.ScreenBounds.Left, y = dock.ScreenBounds.Top, width = dock.Width, height = dock.Height },
+                taskbarEmbedded = dock.IsEmbedded
             }), Encoding.UTF8);
         }
         catch { }
@@ -490,10 +576,10 @@ internal sealed class TrayContext : ApplicationContext
     {
         if (details == null || details.IsDisposed)
         {
-            details = new QuotaDetails(dock.Bounds);
+            details = new QuotaDetails(dock.ScreenBounds);
             details.FormClosed += delegate { hoverIntent.Dismiss(); };
         }
-        details.PlaceNear(dock.Bounds);
+        details.PlaceNear(dock.ScreenBounds);
         details.UpdateValues(latest, stale, error);
         if (!details.Visible) details.Show(dock);
     }

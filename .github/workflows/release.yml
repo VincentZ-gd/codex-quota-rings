@@ -1,4 +1,4 @@
-name: Build and publish v2.4.0
+name: Build and publish v2.5.2
 
 on:
   push:
@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-v2.4.0
+  group: release-v2.5.2
   cancel-in-progress: false
 
 jobs:
@@ -38,10 +38,11 @@ jobs:
           RELEASE_COMMIT: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          gh release view v2.4.0 --json url 2>$null
+          gh release view v2.5.2 --json url 2>$null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host 'v2.4.0 already exists; leaving its assets unchanged.'
+            Write-Host 'v2.5.2 already exists; leaving its assets unchanged.'
             exit 0
           }
-          gh release create v2.4.0 dist/CodexQuotaRings-v2.4.0-windows.zip dist/SHA256SUMS.txt --target $env:RELEASE_COMMIT --title 'Codex Quota Rings v2.4.0' --notes-file RELEASE_NOTES.md
+          gh release create v2.5.2 dist/CodexQuotaRings-v2.5.2-windows.zip dist/SHA256SUMS.txt --target $env:RELEASE_COMMIT --title 'Codex Quota Rings v2.5.2' --notes-file RELEASE_NOTES.md
           if ($LASTEXITCODE -ne 0) { throw 'Release publishing failed.' }
+
